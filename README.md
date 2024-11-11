@@ -45,16 +45,13 @@ To test the Karma Points contract, run in terminal: -
 
 ### Verifying the contracts
 
-https://v2-docs.zksync.io/api/hardhat/compiling-libraries.html#openzeppelin-utility-libraries
+https://code.zksync.io/tutorials/how-to-verify-contracts
 
-https://v2-docs.zksync.io/dev/guide/contract-verification.html#verifying-contracts-using-the-zksync-block-explorer
-
-### ZkSync Regenisis
+### ZkSync Regenesis
 
 Get ETH in wallet via ZKsync Bridge or Faucet -> https://portal.zksync.io/
 Delete cache-zk and artifacts-zk
 Then, compile and re-deploy the contracts
 
-To know more about testing in ZKsync, visit https://v2-docs.zksync.io/api/hardhat/testing.html
-To get more info about using Hardhat with ZKsync, visit https://v2-docs.zksync.io/api/hardhat/
+To get more info about using Hardhat with ZKsync, visit https://docs.zksync.io/build/tooling/hardhat/guides/getting-started
 To get tokens for testing on ZKsync, visit https://portal.zksync.io
