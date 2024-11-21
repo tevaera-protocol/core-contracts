@@ -163,7 +163,7 @@ contract KarmaPointV1 is
         require(!paused(), "Token transfer while paused");
     }
 
-    /// @dev Override the transfer function to restrict transfers to approved DEXs
+    /// @dev Override the transfer function to restrict transfers by approved DEXs
     /// @param recipient The address to receive the tokens
     /// @param amount The amount to transfer
     /// @return bool True if the transfer was successful
@@ -178,7 +178,7 @@ contract KarmaPointV1 is
         return super.transfer(recipient, amount);
     }
 
-    /// @dev Override the transferFrom function to restrict transfers to approved DEXs
+    /// @dev Override the transferFrom function to restrict transfers by approved DEXs
     /// @param sender The address transferring the tokens
     /// @param recipient The address to receive the tokens
     /// @param amount The amount to transfer
