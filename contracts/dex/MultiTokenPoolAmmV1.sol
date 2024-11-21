@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.18;
 
-import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/cryptography/ECDSAUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -29,20 +28,17 @@ contract MultiTokenPoolAmmV1 is
 
     address public trustedCaller;
     address public kpToken;
-    address public feeToken;
+    address public tevaToken;
     uint256 public feeNumerator;
     uint256 public feeDenominator;
 
-    enum SwapType {
-        ExactTokensForTokens,
-        TokensForExactTokens
-    }
     struct Pool {
         address token0;
         address token1;
         uint256 reserve0;
         uint256 reserve1;
-        uint256 totalLiquidity;
+        uint256 totalLiquidity0;
+        uint256 totalLiquidity1;
         uint256 minReserve0;
         uint256 minReserve1;
         bool publicPool;
@@ -52,7 +48,8 @@ contract MultiTokenPoolAmmV1 is
     /* Mappings */
     mapping(address account => uint256) private _nonces;
     mapping(bytes32 => Pool) public pools;
-    mapping(bytes32 => mapping(address => uint256)) public liquidity;
+    mapping(bytes32 => mapping(address => uint256)) public liquidity0;
+    mapping(bytes32 => mapping(address => uint256)) public liquidity1;
     mapping(bytes32 => mapping(address => bool)) public whitelist;
 
     /* Events */
@@ -62,7 +59,8 @@ contract MultiTokenPoolAmmV1 is
         address token1,
         uint256 amount0,
         uint256 amount1,
-        uint256 shares
+        uint256 shares0,
+        uint256 shares1
     );
     event LiquidityRemoved(
         address indexed provider,
@@ -70,10 +68,12 @@ contract MultiTokenPoolAmmV1 is
         address token1,
         uint256 amount0,
         uint256 amount1,
-        uint256 shares
+        uint256 shares0,
+        uint256 shares1
     );
     event Swap(
         address indexed swapper,
+        uint256 indexed nonce,
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
@@ -102,17 +102,17 @@ contract MultiTokenPoolAmmV1 is
     }
 
     function initialize(
-        address _feeToken,
+        address _tevaToken,
         address _trustedCaller,
         address _kpToken
     ) public initializer {
         __Ownable_init();
         __UUPSUpgradeable_init();
         __Pausable_init();
-        transferOwnership(msg.sender);
+        __ReentrancyGuard_init();
         feeNumerator = 9970; // Initial fee: 0.30%
         feeDenominator = 10000;
-        feeToken = _feeToken;
+        tevaToken = _tevaToken;
         trustedCaller = _trustedCaller;
         kpToken = _kpToken;
     }
@@ -138,8 +138,8 @@ contract MultiTokenPoolAmmV1 is
         _unpause();
     }
 
-    function updateFeeToken(address _feeToken) external onlyOwner {
-        feeToken = _feeToken;
+    function updateTevaToken(address _tevaToken) external onlyOwner {
+        tevaToken = _tevaToken;
     }
 
     /**
@@ -237,9 +237,10 @@ contract MultiTokenPoolAmmV1 is
      * @dev Adds liquidity to a pool.
      * @param tokenA The contract address of the first token.
      * @param tokenB The contract address of the second token.
-     * @param amountA The amount of tokenA to add as liquidity.
-     * @param amountB The amount of tokenB to add as liquidity.
-     * @return shares The liquidity shares allocated to the provider.
+     * @param amountA The amount of token0 to add as liquidity.
+     * @param amountB The amount of token1 to add as liquidity.
+     * @return shares0 The liquidity shares of token0 allocated to the provider.
+     * @return shares1 The liquidity shares of token1 allocated to the provider.
      */
     function addLiquidity(
         address tokenA,
@@ -251,73 +252,111 @@ contract MultiTokenPoolAmmV1 is
         nonReentrant
         onlyWhitelistedOrOwner(tokenA.getPoolId(tokenB))
         whenNotPaused
-        returns (uint256 shares)
+        returns (uint256 shares0, uint256 shares1)
     {
         bytes32 poolId = tokenA.getPoolId(tokenB);
         Pool storage pool = pools[poolId];
 
+        require(
+            tokenA == tevaToken || tokenB == tevaToken,
+            "One of the token should be Teva!"
+        );
+
+        (address token0, address token1) = tokenA < tokenB
+            ? (tokenA, tokenB)
+            : (tokenB, tokenA);
+
+        (uint256 amount0, uint256 amount1) = tokenA < tokenB
+            ? (amountA, amountB)
+            : (amountB, amountA);
+
+        // Record the balances of the tokens before transfer
+        uint256 balance0Before = IERC20TokenUpgradeable(token0).balanceOf(address(this));
+        uint256 balance1Before = IERC20TokenUpgradeable(token1).balanceOf(address(this));
+
+        // Initialize pool if it doesn't exist
         if (!pool.exists) {
             require(msg.sender == owner(), "Pool does not exist");
             pool.exists = true;
-            pool.token0 = tokenA;
-            pool.token1 = tokenB;
+            pool.token0 = token0;
+            pool.token1 = token1;
         }
 
         require(
-            amountA >= pool.minReserve0 && amountB >= pool.minReserve1,
+            amount0 >= pool.minReserve0 && amount0 >= pool.minReserve1,
             "Min reserve not met"
         );
 
-        if (pool.totalLiquidity == 0) {
-            shares = DexLibrary.sqrt(amountA * amountB);
-        } else {
-            shares = DexLibrary.min(
-                (amountA * pool.totalLiquidity) / pool.reserve0,
-                (amountB * pool.totalLiquidity) / pool.reserve1
+        // Transfer the tokens from the user to the contract
+        if (amount0 > 0) {
+            IERC20TokenUpgradeable(token0).safeTransferFrom(
+                msg.sender,
+                address(this),
+                amount0
+            );
+        }
+        if (amount1 > 0) {
+            IERC20TokenUpgradeable(token1).safeTransferFrom(
+                msg.sender,
+                address(this),
+                amount1
             );
         }
 
-        require(shares > 0, "Zero shares issued");
+        // Calculate the actual amounts received after the transfer
+        uint256 actualAmount0 = IERC20TokenUpgradeable(token0).balanceOf(address(this)) -
+            balance0Before;
+        uint256 actualAmount1 = IERC20TokenUpgradeable(token1).balanceOf(address(this)) -
+            balance1Before;
 
-        pool.reserve0 += amountA;
-        pool.reserve1 += amountB;
-        pool.totalLiquidity += shares;
-        liquidity[poolId][msg.sender] += shares;
+        // Calculate shares based on actual amounts received
+        if (pool.totalLiquidity0 == 0 && pool.totalLiquidity1 == 0) {
+            shares0 = DexLibrary.sqrt(actualAmount0 * actualAmount1);
+            shares1 = shares0;
+        } else {
+            shares0 = (actualAmount0 * pool.totalLiquidity0) / pool.reserve0;
+            shares1 = (actualAmount1 * pool.totalLiquidity1) / pool.reserve1;
+        }
 
-        IERC20TokenUpgradeable(tokenA).safeTransferFrom(
-            msg.sender,
-            address(this),
-            amountA
-        );
-        IERC20TokenUpgradeable(tokenB).safeTransferFrom(
-            msg.sender,
-            address(this),
-            amountB
-        );
+        require(shares0 > 0 || shares1 > 0, "Zero shares issued");
 
+        // Update the pool's reserves and total liquidity
+        pool.reserve0 += actualAmount0;
+        pool.reserve1 += actualAmount1;
+        pool.totalLiquidity0 += shares0;
+        pool.totalLiquidity1 += shares1;
+
+        // Update the user's liquidity
+        liquidity0[poolId][msg.sender] += shares0;
+        liquidity1[poolId][msg.sender] += shares1;
+
+        // Emit the liquidity added event
         emit LiquidityAdded(
             msg.sender,
-            tokenA,
-            tokenB,
-            amountA,
-            amountB,
-            shares
+            token0,
+            token1,
+            actualAmount0,
+            actualAmount1,
+            shares0,
+            shares1
         );
-        return shares;
+        return (shares0, shares1);
     }
 
     /**
      * @dev Removes liquidity from a pool.
      * @param tokenA The contract address of the first token.
      * @param tokenB The contract address of the second token.
-     * @param shares The number of liquidity shares to withdraw.
+     * @param shares0 The number of liquidity shares of token0 to withdraw.
+     * @param shares1 The number of liquidity shares of token1 to withdraw.
      * @return amount0 The amount of tokenA withdrawn.
      * @return amount1 The amount of tokenB withdrawn.
      */
     function removeLiquidity(
         address tokenA,
         address tokenB,
-        uint256 shares
+        uint256 shares0,
+        uint256 shares1
     )
         external
         nonReentrant
@@ -326,26 +365,48 @@ contract MultiTokenPoolAmmV1 is
         returns (uint256 amount0, uint256 amount1)
     {
         bytes32 poolId = tokenA.getPoolId(tokenB);
+
+        (uint256 _shares0, uint256 _shares1) = tokenA < tokenB
+            ? (shares0, shares1)
+            : (shares1, shares0);
+
         require(
-            shares > 0 && shares <= liquidity[poolId][msg.sender],
+            (_shares0 > 0 && _shares0 <= liquidity0[poolId][msg.sender]) ||
+                (_shares1 > 0 && _shares1 <= liquidity1[poolId][msg.sender]),
             "Invalid share amount"
         );
 
         Pool storage pool = pools[poolId];
         require(pool.exists, "Pool does not exist");
+        require(
+            pool.totalLiquidity0 > 0 && pool.totalLiquidity1 > 0,
+            "zero liquidity"
+        );
 
-        amount0 = (shares * pool.reserve0) / pool.totalLiquidity;
-        amount1 = (shares * pool.reserve1) / pool.totalLiquidity;
+        amount0 = (_shares0 * pool.reserve0) / pool.totalLiquidity0;
+        amount1 = (_shares1 * pool.reserve1) / pool.totalLiquidity1;
 
-        require(amount0 > 0 && amount1 > 0, "Invalid amounts returned");
+        require(amount0 > 0 || amount1 > 0, "Invalid amounts returned");
 
         pool.reserve0 -= amount0;
         pool.reserve1 -= amount1;
-        pool.totalLiquidity -= shares;
-        liquidity[poolId][msg.sender] -= shares;
+        pool.totalLiquidity0 -= _shares0;
+        pool.totalLiquidity1 -= _shares1;
+        liquidity0[poolId][msg.sender] -= _shares0;
+        liquidity1[poolId][msg.sender] -= _shares1;
 
-        IERC20TokenUpgradeable(pool.token0).safeTransfer(msg.sender, amount0);
-        IERC20TokenUpgradeable(pool.token1).safeTransfer(msg.sender, amount1);
+        if (amount0 > 0) {
+            IERC20TokenUpgradeable(pool.token0).safeTransfer(
+                msg.sender,
+                amount0
+            );
+        }
+        if (amount1 > 0) {
+            IERC20TokenUpgradeable(pool.token1).safeTransfer(
+                msg.sender,
+                amount1
+            );
+        }
 
         emit LiquidityRemoved(
             msg.sender,
@@ -353,7 +414,8 @@ contract MultiTokenPoolAmmV1 is
             pool.token1,
             amount0,
             amount1,
-            shares
+            _shares0,
+            _shares1
         );
         return (amount0, amount1);
     }
@@ -408,7 +470,7 @@ contract MultiTokenPoolAmmV1 is
             feeNumerator,
             feeDenominator,
             tokenIn,
-            feeToken
+            tevaToken
         );
         require(amountOut > 0, "Insufficient output amount");
         if (tokenIn == kpToken || tokenOut == kpToken) {
@@ -418,7 +480,6 @@ contract MultiTokenPoolAmmV1 is
                 amountIn,
                 amountOut,
                 deadline,
-                SwapType.ExactTokensForTokens,
                 _signature
             );
         } else {
@@ -434,77 +495,20 @@ contract MultiTokenPoolAmmV1 is
         }
         DexLibrary.updateReserves(pool, tokenIn, amountIn, amountOut);
 
-        emit Swap(msg.sender, tokenIn, tokenOut, amountIn, amountOut);
-        return amountOut;
-    }
-
-    /**
-     * @dev Swaps tokens to get an exact amount of another token. // Buy KP : Contract Burn KP and recieve teva, User Recieve Off-Chain KP on Game Wallet
-     * @param tokenIn The contract address of the input token.
-     * @param tokenOut The contract address of the output token.
-     * @param amountOut The exact amount of the output token desired.
-     * @param deadline The deadline for the swap.
-     * @return amountIn The amount of the input token required to get the exact output amount.
-     */
-    function swapTokensForExactTokens(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountOut,
-        uint256 deadline,
-        bytes calldata _signature
-    )
-        external
-        ensure(deadline)
-        nonReentrant
-        whenNotPaused
-        returns (uint256 amountIn)
-    {
-        require(amountOut > 0, "Invalid output amount");
-        bytes32 poolId = tokenIn.getPoolId(tokenOut);
-
-        Pool storage pool = pools[poolId];
-        require(pool.exists, "Pool does not exist");
-
-        (uint256 reserveIn, uint256 reserveOut) = (tokenIn == pool.token0)
-            ? (pool.reserve0, pool.reserve1)
-            : (pool.reserve1, pool.reserve0);
-
-        amountIn = amountOut.calculateAmountIn(
-            reserveIn,
-            reserveOut,
-            feeNumerator,
-            feeDenominator,
+        // handle nonce increment if kp token is tokenIn
+        uint256 nonceUsed;
+        if (tokenIn == kpToken) {
+            nonceUsed = _useNonce(msg.sender);
+        }
+        emit Swap(
+            msg.sender,
+            nonceUsed,
+            tokenIn,
             tokenOut,
-            feeToken
+            amountIn,
+            amountOut
         );
-        require(amountIn > 0, "Insufficient input amount");
-
-        if (tokenIn == kpToken || tokenOut == kpToken) {
-            settlement(
-                tokenIn,
-                tokenOut,
-                amountIn,
-                amountOut,
-                deadline,
-                SwapType.TokensForExactTokens,
-                _signature
-            );
-        } else {
-            IERC20TokenUpgradeable(tokenIn).safeTransferFrom(
-                msg.sender,
-                address(this),
-                amountIn
-            );
-            IERC20TokenUpgradeable(tokenOut).safeTransfer(
-                msg.sender,
-                amountOut
-            );
-        }
-
-        DexLibrary.updateReserves(pool, tokenIn, amountIn, amountOut);
-
-        emit Swap(msg.sender, tokenIn, tokenOut, amountIn, amountOut);
-        return amountIn;
+        return amountOut;
     }
 
     /**
@@ -534,7 +538,7 @@ contract MultiTokenPoolAmmV1 is
                 feeNumerator,
                 feeDenominator,
                 tokenIn,
-                feeToken
+                tevaToken
             );
     }
 
@@ -565,7 +569,7 @@ contract MultiTokenPoolAmmV1 is
                 feeNumerator,
                 feeDenominator,
                 tokenOut,
-                feeToken
+                tevaToken
             );
     }
 
@@ -579,37 +583,14 @@ contract MultiTokenPoolAmmV1 is
         uint256 amountIn,
         uint256 amountOut,
         uint256 deadline,
-        SwapType swapType,
         bytes calldata _signature
     ) internal {
         if (address(kpToken) == tokenIn) {
-            if (swapType == SwapType.ExactTokensForTokens) {
-                verify(
-                    abi.encode(
-                        tokenIn,
-                        tokenOut,
-                        amountIn,
-                        msg.sender,
-                        _useNonce(msg.sender),
-                        deadline
-                    ),
-                    deadline,
-                    _signature
-                );
-            } else if (swapType == SwapType.TokensForExactTokens) {
-                verify(
-                    abi.encode(
-                        tokenIn,
-                        tokenOut,
-                        amountOut,
-                        msg.sender,
-                        _useNonce(msg.sender),
-                        deadline
-                    ),
-                    deadline,
-                    _signature
-                );
-            }
+            verify(
+                abi.encode(amountIn, msg.sender, _nonces[msg.sender], deadline),
+                deadline,
+                _signature
+            );
             IERC20TokenUpgradeable(kpToken).mint(address(this), amountIn);
             IERC20TokenUpgradeable(tokenOut).safeTransfer(
                 msg.sender,
@@ -625,7 +606,7 @@ contract MultiTokenPoolAmmV1 is
                 msg.sender,
                 amountOut
             );
-            IERC20TokenUpgradeable(kpToken).burn(msg.sender, amountOut); // will add a burn function here
+            IERC20TokenUpgradeable(kpToken).burn(msg.sender, amountOut);
         }
     }
 
@@ -637,6 +618,7 @@ contract MultiTokenPoolAmmV1 is
      *
      */
     function updateTrustedCaller(address newTrustedCaller) external onlyOwner {
+        require(newTrustedCaller != address(0), "can not address zero");
         trustedCaller = newTrustedCaller;
     }
 }

@@ -60,7 +60,7 @@ contract KarmaPointV1 is
     /// @param dexAddress The address of the DEX to approve
     function approveDEX(
         address dexAddress
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external {
         grantRole(DEX_ROLE, dexAddress);
     }
 
@@ -68,7 +68,7 @@ contract KarmaPointV1 is
     /// @param dexAddress The address of the DEX to revoke
     function revokeDEX(
         address dexAddress
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external {
         revokeRole(DEX_ROLE, dexAddress);
     }
 
