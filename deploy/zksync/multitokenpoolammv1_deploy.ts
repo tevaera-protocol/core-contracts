@@ -24,6 +24,8 @@ export default async function (hre: HardhatRuntimeEnvironment) {
   if (!kpTokenContract) throw new Error("Please set kpTokenContract");
   const trustedCaller = process.env.TRUSTED_CALLER;
   if (!trustedCaller) throw new Error("Please set trustedCaller");
+  const safeAddress = process.env.SAFE_ADDRESS;
+  if (!safeAddress) throw new Error("Please set safeAddress");
 
   // Initialize the safeWallet.
   const proxyAdminWallet = new Wallet(
@@ -113,7 +115,7 @@ export default async function (hre: HardhatRuntimeEnvironment) {
     contractAdminWallet._signerL2()
   );
 
-  const initializeMultiTokenPoolAmmV1Tx = await nyContract.initialize(tevaTokenContract, trustedCaller, kpTokenContract);
+  const initializeMultiTokenPoolAmmV1Tx = await nyContract.initialize(tevaTokenContract, trustedCaller, kpTokenContract, safeAddress);
   await initializeMultiTokenPoolAmmV1Tx.wait();
   console.log(
     "MultiTokenPoolAmmV1 initialization response: ",

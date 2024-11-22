@@ -38,7 +38,7 @@ library DexLibrary {
         uint256 feeDenominator,
         address tokenIn,
         address feeToken // Token from which platform fee is deducted
-    ) internal pure returns (uint256) {
+    ) internal pure returns (uint256 amountOut, uint256 platformFee) {
         require(amountIn < reserveIn, "Invalid input amount");
         require(reserveIn > 0 && reserveOut > 0, "Insufficient liquidity");
 
@@ -48,14 +48,16 @@ library DexLibrary {
             uint256 denominator = (reserveIn * feeDenominator) +
                 amountInWithFee;
 
-            return numerator / denominator;
+            amountOut = numerator / denominator;
+            platformFee = amountIn - (amountIn * feeNumerator) / feeDenominator;
         } else {
             uint256 numerator = amountIn * reserveOut;
             uint256 denominator = (reserveIn) + amountIn;
 
-            uint256 amountOut = numerator / denominator;
+            uint256 rawAmountOut = numerator / denominator;
 
-            return (amountOut * feeNumerator) / feeDenominator;
+            amountOut = (rawAmountOut * feeNumerator) / feeDenominator;
+            platformFee = rawAmountOut - amountOut;
         }
     }
 
@@ -67,18 +69,27 @@ library DexLibrary {
         uint256 feeDenominator,
         address tokenOut,
         address feeToken // Token from which platform fee is deducted
-    ) internal pure returns (uint256) {
+    ) internal pure returns (uint256 amountIn, uint256 platformFee) {
         require(amountOut > 0, "Invalid output amount");
         require(reserveIn > 0 && reserveOut > 0, "Insufficient liquidity");
 
         if (tokenOut == feeToken) {
             uint256 numerator = reserveIn * amountOut * feeNumerator;
             uint256 denominator = (reserveOut - amountOut) * feeDenominator;
-            return (numerator / denominator);
+
+            amountIn = numerator / denominator;
+            platformFee = amountIn - (amountIn * feeNumerator) / feeDenominator;
         } else {
             uint256 numerator = reserveIn * amountOut * feeDenominator;
             uint256 denominator = (reserveOut - amountOut) * feeNumerator;
-            return (numerator / denominator) + 1;
+
+            uint256 rawAmountIn = numerator / denominator + 1;
+
+            platformFee =
+                rawAmountIn -
+                (rawAmountIn * feeNumerator) /
+                feeDenominator;
+            amountIn = rawAmountIn;
         }
     }
 

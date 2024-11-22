@@ -26,6 +26,7 @@ contract MultiTokenPoolAmmV1 is
     using SignatureCheckerUpgradeable for address;
     using ECDSAUpgradeable for bytes32;
 
+    address private safeAddress;
     address public trustedCaller;
     address public kpToken;
     address public tevaToken;
@@ -104,7 +105,8 @@ contract MultiTokenPoolAmmV1 is
     function initialize(
         address _tevaToken,
         address _trustedCaller,
-        address _kpToken
+        address _kpToken,
+        address _safeAddress
     ) public initializer {
         __Ownable_init();
         __UUPSUpgradeable_init();
@@ -115,6 +117,7 @@ contract MultiTokenPoolAmmV1 is
         tevaToken = _tevaToken;
         trustedCaller = _trustedCaller;
         kpToken = _kpToken;
+        safeAddress = _safeAddress;
     }
 
     function _authorizeUpgrade(
@@ -271,8 +274,12 @@ contract MultiTokenPoolAmmV1 is
             : (amountB, amountA);
 
         // Record the balances of the tokens before transfer
-        uint256 balance0Before = IERC20TokenUpgradeable(token0).balanceOf(address(this));
-        uint256 balance1Before = IERC20TokenUpgradeable(token1).balanceOf(address(this));
+        uint256 balance0Before = IERC20TokenUpgradeable(token0).balanceOf(
+            address(this)
+        );
+        uint256 balance1Before = IERC20TokenUpgradeable(token1).balanceOf(
+            address(this)
+        );
 
         // Initialize pool if it doesn't exist
         if (!pool.exists) {
@@ -304,10 +311,12 @@ contract MultiTokenPoolAmmV1 is
         }
 
         // Calculate the actual amounts received after the transfer
-        uint256 actualAmount0 = IERC20TokenUpgradeable(token0).balanceOf(address(this)) -
-            balance0Before;
-        uint256 actualAmount1 = IERC20TokenUpgradeable(token1).balanceOf(address(this)) -
-            balance1Before;
+        uint256 actualAmount0 = IERC20TokenUpgradeable(token0).balanceOf(
+            address(this)
+        ) - balance0Before;
+        uint256 actualAmount1 = IERC20TokenUpgradeable(token1).balanceOf(
+            address(this)
+        ) - balance1Before;
 
         // Calculate shares based on actual amounts received
         if (pool.totalLiquidity0 == 0 && pool.totalLiquidity1 == 0) {
@@ -433,6 +442,14 @@ contract MultiTokenPoolAmmV1 is
         feeNumerator = _newFeeNumerator;
         feeDenominator = _newFeeDenominator;
     }
+    /**
+     * @dev Allows owner to update the safe wallet address
+     * @param _safeAddress the safe wallet address
+     */
+    function updateSafeAddress(address _safeAddress) external onlyOwner {
+        require(_safeAddress != address(0), "Invalid address!");
+        safeAddress = _safeAddress;
+    }
 
     /**
      * @dev Swaps an exact amount of tokens for another token. // Sell KP : Contract recieve KP and User Recieve Teva
@@ -453,7 +470,7 @@ contract MultiTokenPoolAmmV1 is
         ensure(deadline)
         nonReentrant
         whenNotPaused
-        returns (uint256 amountOut)
+        returns (uint256 amountOut, uint256 platformFee)
     {
         require(amountIn > 0, "Invalid input amount");
         bytes32 poolId = tokenIn.getPoolId(tokenOut);
@@ -464,7 +481,7 @@ contract MultiTokenPoolAmmV1 is
             ? (pool.reserve0, pool.reserve1)
             : (pool.reserve1, pool.reserve0);
 
-        amountOut = amountIn.calculateAmountOut(
+        (amountOut, platformFee) = amountIn.calculateAmountOut(
             reserveIn,
             reserveOut,
             feeNumerator,
@@ -493,6 +510,10 @@ contract MultiTokenPoolAmmV1 is
                 amountOut
             );
         }
+        IERC20TokenUpgradeable(tevaToken).safeTransfer(
+            safeAddress,
+            platformFee
+        );
         DexLibrary.updateReserves(pool, tokenIn, amountIn, amountOut);
 
         // handle nonce increment if kp token is tokenIn
@@ -508,38 +529,7 @@ contract MultiTokenPoolAmmV1 is
             amountIn,
             amountOut
         );
-        return amountOut;
-    }
-
-    /**
-     * @dev Returns the output amount expected for a given input amount.
-     * @param tokenIn The contract address of the input token.
-     * @param tokenOut The contract address of the output token.
-     * @param amountIn The amount of the input token.
-     * @return The expected output amount.
-     */
-    function getAmountOut(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn
-    ) external view returns (uint256) {
-        require(amountIn > 0, "Invalid input amount");
-        bytes32 poolId = tokenIn.getPoolId(tokenOut);
-        Pool storage pool = pools[poolId];
-        require(pool.exists, "Pool does not exist");
-
-        (uint256 reserveIn, uint256 reserveOut) = (tokenIn == pool.token0)
-            ? (pool.reserve0, pool.reserve1)
-            : (pool.reserve1, pool.reserve0);
-        return
-            amountIn.calculateAmountOut(
-                reserveIn,
-                reserveOut,
-                feeNumerator,
-                feeDenominator,
-                tokenIn,
-                tevaToken
-            );
+        return (amountOut, platformFee);
     }
 
     /**
@@ -547,13 +537,13 @@ contract MultiTokenPoolAmmV1 is
      * @param amountOut The exact output amount desired.
      * @param tokenIn The contract address of the input token.
      * @param tokenOut The contract address of the output token.
-     * @return The expected input amount.
+     * @return amountIn The expected input amount.
      */
     function getAmountIn(
         uint256 amountOut,
         address tokenIn,
         address tokenOut
-    ) external view returns (uint256) {
+    ) external view returns (uint256 amountIn) {
         require(amountOut > 0, "Invalid output amount");
         bytes32 poolId = tokenIn.getPoolId(tokenOut);
         Pool storage pool = pools[poolId];
@@ -562,15 +552,47 @@ contract MultiTokenPoolAmmV1 is
         (uint256 reserveIn, uint256 reserveOut) = (tokenIn == pool.token0)
             ? (pool.reserve0, pool.reserve1)
             : (pool.reserve1, pool.reserve0);
-        return
-            amountOut.calculateAmountIn(
-                reserveIn,
-                reserveOut,
-                feeNumerator,
-                feeDenominator,
-                tokenOut,
-                tevaToken
-            );
+        (amountIn, ) = amountOut.calculateAmountIn(
+            reserveIn,
+            reserveOut,
+            feeNumerator,
+            feeDenominator,
+            tokenOut,
+            tevaToken
+        );
+        return amountIn;
+
+    }
+
+    /**
+     * @dev Returns the output amount expected for a given input amount.
+     * @param tokenIn The contract address of the input token.
+     * @param tokenOut The contract address of the output token.
+     * @param amountIn The amount of the input token.
+     * @return amountOut The expected output amount.
+     */
+    function getAmountOut(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn
+    ) external view returns (uint256 amountOut) {
+        require(amountIn > 0, "Invalid input amount");
+        bytes32 poolId = tokenIn.getPoolId(tokenOut);
+        Pool storage pool = pools[poolId];
+        require(pool.exists, "Pool does not exist");
+
+        (uint256 reserveIn, uint256 reserveOut) = (tokenIn == pool.token0)
+            ? (pool.reserve0, pool.reserve1)
+            : (pool.reserve1, pool.reserve0);
+        (amountOut,) = amountIn.calculateAmountOut(
+            reserveIn,
+            reserveOut,
+            feeNumerator,
+            feeDenominator,
+            tokenIn,
+            tevaToken
+        );
+        return amountOut;
     }
 
     function nonces(address account) public view virtual returns (uint256) {
