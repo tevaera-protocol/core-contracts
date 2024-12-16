@@ -514,7 +514,22 @@ contract MultiTokenPoolAmmV1 is
             safeAddress,
             platformFee
         );
-        DexLibrary.updateReserves(pool, tokenIn, amountIn, amountOut);
+        
+        if (tokenIn == tevaToken) {
+            DexLibrary.updateReserves(
+                pool,
+                tokenIn,
+                amountIn - platformFee,
+                amountOut
+            );
+        } else if (tokenOut == tevaToken) {
+            DexLibrary.updateReserves(
+                pool,
+                tokenIn,
+                amountIn,
+                amountOut + platformFee
+            );
+        }
 
         // handle nonce increment if kp token is tokenIn
         uint256 nonceUsed;
@@ -561,7 +576,6 @@ contract MultiTokenPoolAmmV1 is
             tevaToken
         );
         return amountIn;
-
     }
 
     /**
@@ -584,7 +598,7 @@ contract MultiTokenPoolAmmV1 is
         (uint256 reserveIn, uint256 reserveOut) = (tokenIn == pool.token0)
             ? (pool.reserve0, pool.reserve1)
             : (pool.reserve1, pool.reserve0);
-        (amountOut,) = amountIn.calculateAmountOut(
+        (amountOut, ) = amountIn.calculateAmountOut(
             reserveIn,
             reserveOut,
             feeNumerator,
